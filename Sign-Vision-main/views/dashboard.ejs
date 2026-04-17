@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SignSpeak - Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <style>
+        .video-container { transform: scaleX(-1); }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-900 font-sans p-4 md:p-8 min-h-screen">
+
+    <header class="max-w-6xl mx-auto mb-8 flex flex-col md:flex-row justify-between items-center gap-4">
+        <div>
+            <h1 class="text-3xl font-black text-indigo-600 tracking-tight">SignSpeak</h1>
+            <p class="text-slate-500">Logged in as <span class="font-bold text-slate-700"><%= user.username %></span></p>
+        </div>
+        
+        <div class="flex gap-3">
+            <button id="btn-toggle-voice" class="flex items-center gap-2 px-4 py-2 rounded-xl border bg-white text-slate-600 border-slate-200">
+                <i data-lucide="volume-2" class="w-5 h-5"></i>
+                <span id="voice-label">Voice Off</span>
+            </button>
+            <a href="/logout" class="flex items-center gap-2 px-4 py-2 rounded-xl bg-red-50 text-red-600 border border-red-100 hover:bg-red-100 transition-colors">
+                <i data-lucide="log-out" class="w-4 h-4"></i>
+                <span>Logout</span>
+            </a>
+        </div>
+    </header>
+
+    <main class="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-8">
+        <div class="lg:col-span-8 flex flex-col gap-4">
+            <div class="relative bg-black rounded-3xl overflow-hidden shadow-2xl aspect-video group border-4 border-white">
+                <div id="camera-overlay" class="absolute inset-0 z-10 flex flex-col items-center justify-center bg-slate-900/90 text-white p-6 text-center">
+                    <i data-lucide="camera" class="w-16 h-16 mb-4 text-indigo-400 opacity-50"></i>
+                    <h3 class="text-xl font-bold mb-2">Camera Ready</h3>
+                    <button id="btn-start-camera" class="bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 px-8 rounded-2xl shadow-lg">Start Detection</button>
+                </div>
+                <video id="input-video" class="hidden" playsinline muted></video>
+                <canvas id="output-canvas" class="w-full h-full object-cover video-container"></canvas>
+            </div>
+        </div>
+
+        <div class="lg:col-span-4 bg-white rounded-3xl shadow-sm border border-slate-100 p-6 flex flex-col items-center justify-center min-h-[400px]">
+            <div id="sign-display-container" class="hidden text-center">
+                <div id="detected-sign" class="text-9xl font-black text-indigo-600 mb-4">A</div>
+                <p class="text-slate-400 uppercase tracking-widest font-bold text-xs">Detected Sign</p>
+            </div>
+            <div id="waiting-placeholder" class="text-center text-slate-300">
+                <i data-lucide="hand" class="w-12 h-12 mx-auto mb-2 opacity-20"></i>
+                <p>Perform a sign</p>
+            </div>
+        </div>
+    </main>
+
+   <script>
+        lucide.createIcons();
+        
+        // --- GLOBAL VARIABLES ---
+        let isVoiceEnabled = false;
+        let lastSign = null;
+        let lastSpeakTime = 0;
+        let currentUtterance = null; // FIX: Prevents garbage collection bug
+        
+        // Ensure voices are loaded (Chrome quirk)
+        let voices = [];
+        window.speechSynthesis.onvoiceschanged = () => {
+            voices = window.speechSynthesis.getVoices();
+        };
+
+        // --- 1. SIGN LANGUAGE LIBRARY (Client Side) ---
+        const SIGN_LIBRARY = [
+            { label: 'A', fingers: [false, false, false, false], thumb: true },
+            { label: 'B', fingers: [true, true, true, true], thumb: false },
+            { label: 'C', fingers: [true, true, true, true], thumb: true }, 
+            { label: 'D', fingers: [true, false, false, false], thumb: true },
+            { label: 'E', fingers: [false, false, false, false], thumb: false },
+            { label: 'F', fingers: [false, true, true, true], thumb: true },
+            { label: 'G', fingers: [true, false, false, false], thumb: true },
+            { label: 'H', fingers: [true, true, false, false], thumb: false },
+            { label: 'I', fingers: [false, false, false, true], thumb: false },
+            { label: 'L', fingers: [true, false, false, false], thumb: true },
+            { label: 'O', fingers: [false, false, false, false], thumb: true },
+            { label: 'U', fingers: [true, true, false, false], thumb: false },
+            { label: 'V', fingers: [true, true, false, false], thumb: false },
+            { label: 'W', fingers: [true, true, true, false], thumb: false },
+            { label: 'Y', fingers: [false, false, false, true], thumb: true },
+            { label: '1', fingers: [true, false, false, false], thumb: false },
+            { label: '2', fingers: [true, true, false, false], thumb: false },
+            { label: '3', fingers: [true, true, false, false], thumb: true },
+            { label: '4', fingers: [true, true, true, true], thumb: false },
+            { label: '5', fingers: [true, true, true, true], thumb: true },
+            { label: 'Hello', fingers: [true, true, true, true], thumb: true },
+            { label: 'Yes', fingers: [false, false, false, false], thumb: true },
+            { label: 'No', fingers: [true, true, false, false], thumb: false },
+            { label: 'OK', fingers: [false, true, true, true], thumb: true },
+            { label: 'Peace', fingers: [true, true, false, false], thumb: false },
+            { label: 'Rock On', fingers: [true, false, false, true], thumb: false }
+        ];
+
+        // --- 2. DETECTION LOGIC ---
+        const getDistance = (p1, p2) => Math.hypot(p1.x - p2.x, p1.y - p2.y);
+
+        const analyzeHand = (landmarks) => {
+            const wrist = landmarks[0];
+            const middleMCP = landmarks[9];
+            const pinkyMCP = landmarks[17];
+            const thumbTip = landmarks[4];
+
+            const handScale = getDistance(wrist, middleMCP);
+            
+            const isFingerOpen = (tipIdx, pipIdx) => {
+                const tip = landmarks[tipIdx];
+                const pip = landmarks[pipIdx];
+                return getDistance(tip, wrist) > getDistance(pip, wrist);
+            };
+
+            const isThumbExtended = getDistance(thumbTip, pinkyMCP) > (handScale * 1.2);
+
+            const currentFingerState = [
+                isFingerOpen(8, 6),   // Index
+                isFingerOpen(12, 10), // Middle
+                isFingerOpen(16, 14), // Ring
+                isFingerOpen(20, 18)  // Pinky
+            ];
+
+            let bestMatch = null;
+            let highestScore = -1;
+
+            for (const sign of SIGN_LIBRARY) {
+                let score = 0;
+                sign.fingers.forEach((state, i) => { if (state === currentFingerState[i]) score++; });
+                if (sign.thumb === isThumbExtended) score++;
+
+                if (score > highestScore) {
+                    highestScore = score;
+                    bestMatch = sign;
+                }
+            }
+            return (highestScore >= 4 && bestMatch) ? bestMatch.label : null;
+        };
+
+        // --- 3. UI & DOM ---
+        const videoElement = document.getElementById('input-video');
+        const canvasElement = document.getElementById('output-canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const btnStart = document.getElementById('btn-start-camera');
+        const overlay = document.getElementById('camera-overlay');
+        const signDisplay = document.getElementById('detected-sign');
+        const signContainer = document.getElementById('sign-display-container');
+        const waitingPlaceholder = document.getElementById('waiting-placeholder');
+        
+        // --- 4. IMPROVED VOICE LOGIC ---
+        
+        // Button Listener
+        document.getElementById('btn-toggle-voice').addEventListener('click', function() {
+            isVoiceEnabled = !isVoiceEnabled;
+            
+            // Toggle Visuals
+            this.classList.toggle('bg-indigo-600');
+            this.classList.toggle('text-white');
+            this.classList.toggle('bg-white');
+            this.classList.toggle('text-slate-600');
+            document.getElementById('voice-label').innerText = isVoiceEnabled ? "Voice On" : "Voice Off";
+
+            // FIX: Immediately "prime" the engine on click.
+            // This tells the browser "User wants audio, allow it."
+            if (isVoiceEnabled) {
+                window.speechSynthesis.cancel();
+                const primingUtterance = new SpeechSynthesisUtterance("Voice Enabled");
+                window.speechSynthesis.speak(primingUtterance);
+            }
+        });
+
+        const speak = (text) => {
+            const now = Date.now();
+            
+            // Checks: Voice must be on, text must exist, and throttle (1.5 seconds)
+            if (!isVoiceEnabled || !text || (now - lastSpeakTime < 1500)) return;
+            
+            // cancel previous speech to avoid queue buildup
+            window.speechSynthesis.cancel();
+            
+            // FIX: Assign to global variable to prevent Garbage Collection
+            currentUtterance = new SpeechSynthesisUtterance(text);
+            currentUtterance.rate = 0.9;
+            
+            // Try to set a specific voice if available (improves reliability)
+            if (voices.length > 0) {
+                 // Try to find a standard English voice
+                 const preferredVoice = voices.find(v => v.lang.includes('en-US')) || voices[0];
+                 currentUtterance.voice = preferredVoice;
+            }
+
+            window.speechSynthesis.speak(currentUtterance);
+            lastSpeakTime = now;
+            console.log("Speaking:", text); // Debug log
+        };
+
+        // --- 5. MEDIAPIPE SETUP ---
+        function onResults(results) {
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                
+                // Draw Visuals
+                drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 5});
+                drawLandmarks(canvasCtx, landmarks, {color: '#FF0000', lineWidth: 2});
+
+                // RUN LOGIC LOCALLY
+                const detectedSign = analyzeHand(landmarks);
+
+                if (detectedSign) {
+                    signDisplay.innerText = detectedSign;
+                    signContainer.classList.remove('hidden');
+                    waitingPlaceholder.classList.add('hidden');
+                    
+                    // Only speak if the sign is new
+                    if (detectedSign !== lastSign) {
+                        speak(detectedSign);
+                        lastSign = detectedSign;
+                    }
+                }
+            } else {
+                lastSign = null;
+            }
+            canvasCtx.restore();
+        }
+
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({ 
+            maxNumHands: 1, 
+            modelComplexity: 1, 
+            minDetectionConfidence: 0.7, 
+            minTrackingConfidence: 0.7 
+        });
+        hands.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({image: videoElement}); },
+            width: 640, height: 480
+        });
+
+        btnStart.addEventListener('click', () => {
+            btnStart.innerText = "Starting Model...";
+            camera.start().then(() => {
+                overlay.classList.add('hidden');
+            });
+        });
+    </script>
+</body>
+</html>
